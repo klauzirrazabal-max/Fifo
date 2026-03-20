@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd.exe /c \"python procesar_fifo.py \"\"Base_Fija_diciembre.xlsb\"\"\")",
+      "Bash(cmd.exe /c \"where python & py --version & python --version\")",
+      "Bash(cmd.exe /c \"pip install pywin32\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\FIFO && python procesar_fifo.py Base_Fija_diciembre.xlsb\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\FIFO && python procesar_fifo.py Base_Movil_diciembre.xlsb\")",
+      "Bash(python3:*)",
+      "Bash(unzip:*)",
+      "Bash(python:*)",
+      "Bash(/mnt/c/Python314/python.exe /mnt/c/FIFO/procesar_fifo.py archivos_base.zip FIJA)",
+      "Bash(cmd.exe /c \"cd C:\\\\FIFO && C:\\\\Python314\\\\python.exe procesar_fifo.py archivos_base.zip FIJA\")",
+      "Bash(cmd.exe /c \"cd C:\\\\FIFO && C:\\\\Python314\\\\python.exe procesar_fifo.py archivos_base.zip MOVIL\")",
+      "Bash(python.exe:*)"
+    ]
+  }
+}

@@ -1,0 +1,350 @@
+Sub AnalizarFIFO_PorMaterial_Corregida()
+    Dim ws As Worksheet
+    Dim headerRow As Long, lastCol As Long, lastRow As Long
+    Dim i As Long, j As Long, k As Long
+    Dim colMaterial As Long, colMes As Long, colCDVES As Long, colAlm As Long
+    Dim colNoDesp As Long, colNoFifo As Long
+    Dim hdrRng As Range, hdrCell As Range
+
+    Set ws = ActiveSheet
+
+    ' --- 1) Encontrar fila de encabezado (busca "Material") ---
+    headerRow = 0
+    For i = 1 To 30
+        If Not ws.Rows(i).Find(What:="Material", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False) Is Nothing Then
+            headerRow = i
+            Exit For
+        End If
+    Next i
+    If headerRow = 0 Then
+        MsgBox "No se encontró la fila de encabezado (no hallé 'Material' en las primeras 30 filas).", vbCritical
+        Exit Sub
+    End If
+
+    ' --- 2) Última columna y rango de encabezado ---
+    lastCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
+    Set hdrRng = ws.Range(ws.Cells(headerRow, 1), ws.Cells(headerRow, lastCol))
+
+    ' --- 3) Localizar columnas necesarias ---
+    colMaterial = 0: colMes = 0: colCDVES = 0: colAlm = 0
+    colNoDesp = 0: colNoFifo = 0
+
+    Set hdrCell = hdrRng.Find(What:="Material", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not hdrCell Is Nothing Then colMaterial = hdrCell.Column
+    Set hdrCell = hdrRng.Find(What:="Mes/Año", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not hdrCell Is Nothing Then colMes = hdrCell.Column
+    Set hdrCell = hdrRng.Find(What:="CD VES", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not hdrCell Is Nothing Then colCDVES = hdrCell.Column
+
+    ' Buscar columna de despacho entre varias opciones (flexible)
+    Dim posiblesAlmacenes As Variant
+    posiblesAlmacenes = Array("Almacenes", "PDV", "Televentas VES", "Tienda Virtual VES", "Corporativo VES")
+    For i = LBound(posiblesAlmacenes) To UBound(posiblesAlmacenes)
+        Set hdrCell = hdrRng.Find(What:=posiblesAlmacenes(i), LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not hdrCell Is Nothing Then
+            colAlm = hdrCell.Column
+            Exit For
+        End If
+    Next i
+
+    Set hdrCell = hdrRng.Find(What:="NO DESPACHÓ", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not hdrCell Is Nothing Then colNoDesp = hdrCell.Column
+    Set hdrCell = hdrRng.Find(What:="NO CUMPLIÓ FIFO", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not hdrCell Is Nothing Then colNoFifo = hdrCell.Column
+
+    ' Validar columnas críticas
+    If colMaterial = 0 Or colCDVES = 0 Or colAlm = 0 Then
+        MsgBox "No se encontraron columnas obligatorias. Asegúrate de que existan 'Material', 'CD VES' y alguna de: Almacenes/PDV/Televentas VES/Tienda Virtual VES/Corporativo VES.", vbCritical
+        Exit Sub
+    End If
+
+    ' Crear columnas destino si no existen
+    If colNoDesp = 0 Then
+        colNoDesp = lastCol + 1
+        ws.Cells(headerRow, colNoDesp).Value = "NO DESPACHÓ"
+        lastCol = lastCol + 1
+    End If
+    If colNoFifo = 0 Then
+        colNoFifo = lastCol + 1
+        ws.Cells(headerRow, colNoFifo).Value = "NO CUMPLIÓ FIFO"
+        lastCol = lastCol + 1
+    End If
+
+    ' --- 4) última fila de datos (usa columna del material para up)
+    lastRow = ws.Cells(ws.Rows.Count, colMaterial).End(xlUp).Row
+    If lastRow <= headerRow Then
+        MsgBox "No hay datos bajo el encabezado.", vbExclamation
+        Exit Sub
+    End If
+
+    ' Limpiar columnas destino
+    ws.Range(ws.Cells(headerRow + 1, colNoDesp), ws.Cells(lastRow, colNoDesp)).ClearContents
+    ws.Range(ws.Cells(headerRow + 1, colNoFifo), ws.Cells(lastRow, colNoFifo)).ClearContents
+
+    ' --- 5) Procesar por bloque de Material ---
+    i = headerRow + 1
+    Do While i <= lastRow
+        Dim currentMat As String
+        currentMat = CStr(ws.Cells(i, colMaterial).Value)
+        If Trim(currentMat) = "" Or Left(UCase(Trim(currentMat)), 5) = "TOTAL" Then
+            i = i + 1
+            GoTo SiguienteFila
+        End If
+
+        ' determinar bloque del mismo material
+        Dim startRow As Long, endRow As Long
+        startRow = i
+        endRow = i
+        Do While endRow + 1 <= lastRow And CStr(ws.Cells(endRow + 1, colMaterial).Value) = currentMat
+            endRow = endRow + 1
+        Loop
+
+        ' construir arrays para el bloque
+        Dim n As Long
+        n = endRow - startRow + 1
+        Dim rowsIdx() As Long, arrCD() As Double, arrPDV() As Double, arrRemainCD() As Double
+        ReDim rowsIdx(1 To n)
+        ReDim arrCD(1 To n)
+        ReDim arrPDV(1 To n)
+        ReDim arrRemainCD(1 To n)
+
+        For k = 1 To n
+            rowsIdx(k) = startRow + k - 1
+            arrCD(k) = Val(ws.Cells(rowsIdx(k), colCDVES).Value)
+            arrPDV(k) = Val(ws.Cells(rowsIdx(k), colAlm).Value)
+            arrRemainCD(k) = arrCD(k) ' inicial
+        Next k
+
+        ' Para cada fila con PDV, calcular violation = min(sum(arrRemainCD prev), PDV) y distribuir
+        For k = 1 To n
+            If arrPDV(k) > 0 Then
+                ' calcular suma de remanentes en filas anteriores
+                Dim prior_sum As Double
+                prior_sum = 0
+                For j = 1 To k - 1
+                    prior_sum = prior_sum + arrRemainCD(j)
+                Next j
+
+                If prior_sum > 0 Then
+                    Dim violation As Double
+                    violation = WorksheetFunction.Min(prior_sum, arrPDV(k))
+                    ' registrar en NO CUMPLIÓ FIFO en la fila de despacho
+                    ws.Cells(rowsIdx(k), colNoFifo).Value = ws.Cells(rowsIdx(k), colNoFifo).Value + violation
+
+                    ' distribuir violation hacia atrás sin exceder arrRemainCD
+                    Dim need As Double
+                    need = violation
+                    For j = 1 To k - 1
+                        If arrRemainCD(j) > 0 And need > 0 Then
+                            Dim take As Double
+                            take = WorksheetFunction.Min(arrRemainCD(j), need)
+                            ws.Cells(rowsIdx(j), colNoDesp).Value = ws.Cells(rowsIdx(j), colNoDesp).Value + take
+                            arrRemainCD(j) = arrRemainCD(j) - take
+                            need = need - take
+                        End If
+                        If need <= 0 Then Exit For
+                    Next j
+                End If
+            End If
+        Next k
+
+        ' siguiente bloque: saltar al final del bloque
+        i = endRow + 1
+SiguienteFila:
+    Loop
+
+    ' Llamar al resumen
+    Call ProcesarNoDespachoYResumen_Corregido
+
+    MsgBox "Análisis FIFO por material completado.", vbInformation
+End Sub
+
+Sub ProcesarNoDespachoYResumen_Corregido()
+    Dim ws As Worksheet
+    Dim headerRow As Long, lastCol As Long, lastRow As Long
+    Dim colTotalAlmacenes As Long, colNoDespacho As Long, colNoFifo As Long
+    Dim rngTotalGen As Range, cell As Range
+    Dim totalAlmacenes As Double, totalNoDespacho As Double
+    Dim hdrRng As Range, hdrCell As Range
+    Dim i As Long
+
+    Set ws = ActiveSheet
+
+    ' 1) Buscar la fila del encabezado (donde está "Material")
+    headerRow = 0
+    For i = 1 To 30
+        If Not ws.Rows(i).Find(What:="Material", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False) Is Nothing Then
+            headerRow = i
+            Exit For
+        End If
+    Next i
+    If headerRow = 0 Then
+        MsgBox "No se encontró la fila de encabezado (no hallé 'Material' en las primeras 30 filas).", vbCritical
+        Exit Sub
+    End If
+
+    ' 2) Determinar la última columna
+    lastCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
+    Set hdrRng = ws.Range(ws.Cells(headerRow, 1), ws.Cells(headerRow, lastCol))
+
+    ' 3) Buscar las columnas necesarias
+    colTotalAlmacenes = 0: colNoDespacho = 0: colNoFifo = 0
+
+    Dim posiblesEncabezados As Variant
+    posiblesEncabezados = Array("Almacenes", "PDV", "Televentas VES", "Tienda Virtual VES", "Corporativo VES")
+
+    For Each hdrCell In hdrRng
+        For i = LBound(posiblesEncabezados) To UBound(posiblesEncabezados)
+            If InStr(1, UCase(hdrCell.Value), UCase(posiblesEncabezados(i))) > 0 Then
+                colTotalAlmacenes = hdrCell.Column
+                Exit For
+            End If
+        Next i
+        If colTotalAlmacenes <> 0 Then Exit For
+    Next hdrCell
+
+    Set hdrCell = hdrRng.Find(What:="NO DESPACHÓ", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not hdrCell Is Nothing Then colNoDespacho = hdrCell.Column
+
+    Set hdrCell = hdrRng.Find(What:="NO CUMPLIÓ FIFO", LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not hdrCell Is Nothing Then colNoFifo = hdrCell.Column
+
+    ' Validar columnas
+    If colTotalAlmacenes = 0 Then
+        MsgBox "'Total Almacenes' no fue encontrado.", vbCritical
+        Exit Sub
+    End If
+    If colNoDespacho = 0 Or colNoFifo = 0 Then
+        MsgBox "No se encontraron las columnas 'NO DESPACHÓ' y/o 'NO CUMPLIÓ FIFO'.", vbExclamation
+        Exit Sub
+    End If
+
+    ' 4) Última fila de datos
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow <= headerRow Then
+        MsgBox "No hay datos para procesar.", vbExclamation
+        Exit Sub
+    End If
+
+    ' 5) Buscar la fila "Total general"
+    Set rngTotalGen = Nothing
+    For Each cell In ws.Range(ws.Cells(headerRow + 1, 1), ws.Cells(lastRow, 1))
+        If Trim(UCase(cell.Value)) Like "*TOTAL GENERAL*" Then
+            Set rngTotalGen = cell
+            Exit For
+        End If
+    Next cell
+
+    If rngTotalGen Is Nothing Then
+        MsgBox "No se encontró la fila 'Total general'.", vbExclamation
+        Exit Sub
+    End If
+
+    ' 6) Calcular sumas hasta la fila antes del Total general
+Dim dataLastRow As Long
+dataLastRow = rngTotalGen.Row - 1
+totalAlmacenes = 0
+totalNoDespacho = 0
+
+Dim fila As Long
+For fila = headerRow + 1 To dataLastRow
+    Dim matVal As String
+    matVal = Trim(UCase(ws.Cells(fila, 1).Value))
+    
+    ' Saltar filas vacías o que contienen "TOTAL"
+    If matVal <> "" And Left(matVal, 5) <> "TOTAL" Then
+        If IsNumeric(ws.Cells(fila, colTotalAlmacenes).Value) Then
+            totalAlmacenes = totalAlmacenes + ws.Cells(fila, colTotalAlmacenes).Value
+        End If
+        If IsNumeric(ws.Cells(fila, colNoDespacho).Value) Then
+            totalNoDespacho = totalNoDespacho + ws.Cells(fila, colNoDespacho).Value
+        End If
+    End If
+Next fila
+    ' 7) Escribir totales en la fila del Total general
+ws.Cells(rngTotalGen.Row, colNoDespacho).Value = totalNoDespacho
+ws.Cells(rngTotalGen.Row, colNoFifo).Value = totalNoDespacho  ' si necesitas otro valor, cámbialo aquí
+
+' --- Copiar formato desde el encabezado ---
+Dim headerColor As Long
+Dim headerBold As Boolean
+
+headerColor = ws.Rows(headerRow).Interior.Color
+headerBold = ws.Rows(headerRow).Font.Bold
+
+' Aplicar formato a la fila de totales
+With ws.Rows(rngTotalGen.Row)
+    .Font.Bold = headerBold
+    .Interior.Color = headerColor
+End With
+
+    ' 8) Filtrar solo filas donde NO DESPACHÓ o NO CUMPLIÓ FIFO tengan valor
+    
+    If ws.AutoFilterMode Then ws.AutoFilterMode = False
+
+    Dim tmpCol As Long
+    Dim hdrTmp As Range
+    Dim startCol As Long
+    Dim fieldIndex As Long
+    tmpCol = lastCol + 1
+    ws.Cells(headerRow, tmpCol).Value = "Filtro_TMP"
+
+    For i = headerRow + 1 To dataLastRow
+        ws.Cells(i, tmpCol).Formula = "=OR(NOT(ISBLANK(" & ws.Cells(i, colNoDespacho).Address(False, False) & ")),NOT(ISBLANK(" & ws.Cells(i, colNoFifo).Address(False, False) & ")))"
+    Next i
+
+If ws.AutoFilterMode Then ws.AutoFilterMode = False
+
+' Buscar la columna Filtro_TMP
+Set hdrTmp = ws.Rows(headerRow).Find(What:="Filtro_TMP", LookIn:=xlValues, LookAt:=xlWhole)
+If hdrTmp Is Nothing Then
+    MsgBox "No se encontró la columna temporal 'Filtro_TMP'.", vbCritical
+    Exit Sub
+End If
+
+' Calcular columnas de rango
+startCol = 1
+tmpCol = hdrTmp.Column
+dataLastRow = ws.Cells(ws.Rows.Count, startCol).End(xlUp).Row
+fieldIndex = tmpCol - startCol + 1
+
+' Validar rango antes de filtrar
+If fieldIndex < 1 Then
+    MsgBox "Error: índice de filtro inválido.", vbCritical
+    Exit Sub
+End If
+
+' Aplicar filtro SOLO donde hay encabezados
+Dim filterRange As Range
+Set filterRange = ws.Range(ws.Cells(headerRow, startCol), ws.Cells(dataLastRow, tmpCol))
+
+    ' 9) Crear resumen en J1
+    Dim resumenCell As Range
+    Set resumenCell = ws.Range("K1")
+
+    resumenCell.Value = "Resumen"
+    resumenCell.Offset(1, 0).Value = "Total Despacho"
+    resumenCell.Offset(1, 1).Value = totalAlmacenes
+    resumenCell.Offset(2, 0).Value = "Total No Despacho"
+    resumenCell.Offset(2, 1).Value = totalNoDespacho
+
+    resumenCell.Offset(3, 0).Value = "Cumplimiento Fifo %"
+    If totalAlmacenes <> 0 Then
+        resumenCell.Offset(3, 1).Value = Format((totalAlmacenes - totalNoDespacho) / totalAlmacenes, "0.00%")
+    Else
+        resumenCell.Offset(3, 1).Value = "N/A"
+    End If
+
+    ' Formato del resumen
+    With ws.Range(resumenCell, resumenCell.Offset(3, 1))
+        .Font.Bold = True
+        .Columns.AutoFit
+        .Borders.LineStyle = xlContinuous
+    End With
+
+    ' 10) Limpiar u ocultar columna temporal
+' ws.Columns(tmpCol).Hidden = True
+
+
+    MsgBox "Resumen y filtro aplicados correctamente.", vbInformation
+End Sub
