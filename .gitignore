@@ -1,0 +1,7 @@
+# Archivos de datos (se mantienen solo en local, no se suben al repo)
+*.xlsb
+*.xlsx
+*.zip
+
+# Histórico de procesos mensuales
+historico/
