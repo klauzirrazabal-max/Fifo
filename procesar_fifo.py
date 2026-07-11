@@ -17,10 +17,9 @@ from datetime import datetime, timedelta
 import os
 import sys
 import zipfile
-from functools import partial
 
 # Directorio de trabajo
-DIRECTORIO = r"C:\FIFO"
+DIRECTORIO = os.path.dirname(os.path.abspath(__file__))
 DIRECTORIO_ENTRADA = os.path.join(DIRECTORIO, "archivos_base")
 
 # Diccionario de meses en español
@@ -51,19 +50,22 @@ BATCH_SIZE = 50000
 
 # ===== CONSTANTES FORMATO ZIP (TXT pipe-delimited) =====
 
-# Mapeo de nombres: clave interna → nombre de columna en los .txt
+# Mapeo de nombres: clave interna → lista de posibles nombres de columna en los .txt
+# (se acepta el primero que aparezca). Permite tolerar variantes del export SAP.
 TXT_COL_MAP = {
-    'almacen_tipo1': 'Tipo 1',
-    'centro': 'Centro',
-    'almacen': 'Almacén',
-    'tipo_stock': 'Tipo Stocks Movimiento mercancía (Status)',
-    'fecha_ing': 'Fecha de ingreso',
-    'fecha_mod': 'Modificado el',
-    'serie': 'Número de serie',
-    'marca': 'Marca Claro',
-    'antiguedad': 'Antiguedad',
+    'almacen_tipo1': ['Tipo 1'],
+    'centro': ['Centro'],
+    'almacen': ['Almacén', 'Almacen'],
+    'tipo_stock': ['Tipo Stocks Movimiento mercancía (Status)', 'Tipo stock'],
+    'fecha_ing': ['Fecha de ingreso', 'Fecha de Ingreso'],
+    'fecha_mod': ['Modificado el', 'Fecha modificación'],
+    'serie': ['Número de serie', 'Serie'],
+    'marca': ['Marca Claro'],
+    'antiguedad': ['Antiguedad', 'Antigüedad'],
+    'estado': ['Estado'],  # variante nueva: columna directa "Estado"
 }
-# 'estado' → segunda columna "Status" (col 37), manejo especial por duplicado
+# Si no existe 'Estado' como columna directa (formato viejo), se usa la
+# segunda ocurrencia de la columna duplicada 'Status'.
 
 # Archivos dentro del zip según tipo
 ZIP_FILES = {
@@ -71,8 +73,8 @@ ZIP_FILES = {
     'MOVIL': 'Movil/Descarga_inventario_MOVIL.txt',
 }
 
-# Columnas que deben formatearse como texto (formato txt)
-COLUMNAS_TEXTO_TXT = ['Número de serie', 'Número de equipo', 'Material', 'Lote', 'Nº cliente']
+# Columnas que deben formatearse como texto (formato txt) — soporta nombres viejos y nuevos
+COLUMNAS_TEXTO_TXT = ['Número de serie', 'Serie', 'Número de equipo', 'Material', 'Lote', 'Nº cliente']
 
 
 def detectar_tipo_archivo(nombre_archivo):
@@ -172,22 +174,50 @@ def obtener_archivo_entrada():
         return ruta_completa, tipo_archivo, formato
 
 
+def fecha_a_yyyymmdd_int(fecha_valor):
+    """
+    Convierte una fecha en cualquiera de los formatos soportados a int YYYYMMDD.
+    Soporta:
+      - YYYYMMDD numérico/string (formato legado: '20260421')
+      - DD/MM/YYYY (formato SAP nuevo: '21/04/2026')
+    Devuelve 0 si la fecha es inválida o vacía.
+    """
+    if fecha_valor is None:
+        return 0
+    s = str(fecha_valor).strip()
+    if s in ('', '0', '00000000'):
+        return 0
+    if '/' in s:
+        partes = s.split('/')
+        if len(partes) == 3:
+            try:
+                d, m, a = int(partes[0]), int(partes[1]), int(partes[2])
+                return a * 10000 + m * 100 + d
+            except ValueError:
+                return 0
+        return 0
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return 0
+
+
 def convertir_fecha_mes_año(fecha_valor):
-    """Convierte fecha de formato yyyyMMdd a datetime con día 01"""
-    if fecha_valor is None or fecha_valor == 0 or str(fecha_valor).strip() in ['', '0', '00000000']:
+    """Convierte fecha (YYYYMMDD o DD/MM/YYYY) a datetime con día 01"""
+    n = fecha_a_yyyymmdd_int(fecha_valor)
+    if n == 0:
         return None
     try:
-        fecha_str = str(int(float(fecha_valor)))
-        if len(fecha_str) == 8:
-            año = int(fecha_str[:4])
-            mes = int(fecha_str[4:6])
+        año = n // 10000
+        mes = (n // 100) % 100
+        if 1 <= mes <= 12 and año >= 1900:
             return datetime(año, mes, 1)
-    except:
+    except (ValueError, TypeError):
         pass
     return None
 
 
-def clasificar_fila_fija(fila, idx, fecha_inicio, fecha_fin, alt_mode=False):
+def clasificar_fila_fija(fila, idx, fecha_inicio, fecha_fin):
     """
     Aplica reglas de clasificación FIJA
 
@@ -196,9 +226,10 @@ def clasificar_fila_fija(fila, idx, fecha_inicio, fecha_fin, alt_mode=False):
     Reglas:
     - CD VES: Amacén Tipo 1 = 'CD VES', Centro = 'P008', Almacén = 'P000',
               Estado = 'ALMA', Tipo Stock = '01', sin filtro de fecha
+              Mes/Año = Fecha Modificación (si válida), sino Fecha Ingreso
+    - Almacen U: Centro = 'P008', Almacén startswith 'U', Estado = 'ALMA',
+                 Tipo Stock = '01', Fecha Modificación en mes anterior
     - ALMACENES: Amacén Tipo 1 no en excluidos, Fecha Modificación en mes anterior
-
-    alt_mode: Si True, CD VES usa Fecha Modificación como Mes/Año (si válida), sino Fecha Ingreso
     """
     almacen_tipo1 = fila[idx['almacen_tipo1']]
     centro = fila[idx['centro']]
@@ -209,6 +240,7 @@ def clasificar_fila_fija(fila, idx, fecha_inicio, fecha_fin, alt_mode=False):
     fecha_mod = fila[idx['fecha_mod']]
 
     tipo_stock_str = str(tipo_stock).strip() if tipo_stock else ''
+    almacen_str = str(almacen_val).strip() if almacen_val else ''
 
     # CD VES
     if (almacen_tipo1 == 'CD VES' and
@@ -217,21 +249,25 @@ def clasificar_fila_fija(fila, idx, fecha_inicio, fecha_fin, alt_mode=False):
         estado == 'ALMA' and
         tipo_stock_str in ['1', '01']):
 
-        if alt_mode:
-            mes_año = convertir_fecha_mes_año(fecha_mod)
-            if mes_año is None:
-                mes_año = convertir_fecha_mes_año(fecha_ing)
-        else:
+        mes_año = convertir_fecha_mes_año(fecha_mod)
+        if mes_año is None:
             mes_año = convertir_fecha_mes_año(fecha_ing)
         return ('CD VES', mes_año)
 
+    fecha_mod_int = fecha_a_yyyymmdd_int(fecha_mod)
+
+    # Almacen U (Centro P008 + Almacén que empieza con 'U', filtro Fecha Modificación)
+    if (centro == 'P008' and
+        almacen_str.startswith('U') and
+        estado == 'ALMA' and
+        tipo_stock_str in ['1', '01'] and
+        fecha_inicio <= fecha_mod_int <= fecha_fin):
+
+        mes_año = convertir_fecha_mes_año(fecha_ing)
+        return ('Almacen U', mes_año)
+
     # ALMACENES (filtrar por Fecha Modificación en mes anterior, Mes/Año de Fecha Ingreso)
     if almacen_tipo1 not in EXCLUIDOS_FIJA:
-        try:
-            fecha_mod_int = int(float(fecha_mod)) if fecha_mod else 0
-        except:
-            fecha_mod_int = 0
-
         if fecha_inicio <= fecha_mod_int <= fecha_fin:
             mes_año = convertir_fecha_mes_año(fecha_ing)
             return ('ALMACENES', mes_año)
@@ -239,7 +275,7 @@ def clasificar_fila_fija(fila, idx, fecha_inicio, fecha_fin, alt_mode=False):
     return (None, None)
 
 
-def clasificar_fila_movil(fila, idx, fecha_inicio, fecha_fin, alt_mode=False):
+def clasificar_fila_movil(fila, idx, fecha_inicio, fecha_fin):
     """
     Aplica reglas de clasificación MOVIL
 
@@ -248,6 +284,7 @@ def clasificar_fila_movil(fila, idx, fecha_inicio, fecha_fin, alt_mode=False):
     Reglas:
     - CD VES: Amacén Tipo 1 = 'CD VES', Centro = 'P008', Almacén = 'H000',
               Estado = 'ALMA', Tipo Stock = '01', sin filtro de fecha
+              Mes/Año = Fecha Modificación (si válida), sino Fecha Ingreso
     - PDV (CADENA): Amacén Tipo 1 = 'CADENA', Estado in {'ALMA ENCL', 'ENCL ALMA'},
                     Tipo Stock = '02', Fecha Modificación en mes anterior
     - PDV (CAV/CAC): Amacén Tipo 1 in {'CAV', 'CAC', 'OTROS CADS'},
@@ -259,8 +296,6 @@ def clasificar_fila_movil(fila, idx, fecha_inicio, fecha_fin, alt_mode=False):
                           Tipo Stock in {'01', '07'}, Fecha Modificación en mes anterior
     - Corporativo Ves: Centro = 'P101', Almacén in {'H001', 'H002'}, Estado = 'ALMA',
                        Tipo Stock in {'01', '07'}, Fecha Modificación en mes anterior
-
-    alt_mode: Si True, CD VES usa Fecha Modificación como Mes/Año (si válida), sino Fecha Ingreso
     """
     almacen_tipo1 = fila[idx['almacen_tipo1']]
     centro = fila[idx['centro']]
@@ -273,26 +308,19 @@ def clasificar_fila_movil(fila, idx, fecha_inicio, fecha_fin, alt_mode=False):
     tipo_stock_str = str(tipo_stock).strip() if tipo_stock else ''
     estado_str = str(estado).strip() if estado else ''
 
-    # Obtener fecha de modificación como entero para filtros
-    try:
-        fecha_mod_int = int(float(fecha_mod)) if fecha_mod else 0
-    except:
-        fecha_mod_int = 0
+    fecha_mod_int = fecha_a_yyyymmdd_int(fecha_mod)
 
     en_mes_anterior = fecha_inicio <= fecha_mod_int <= fecha_fin
 
-    # CD VES (sin filtro de fecha)
+    # CD VES (sin filtro de fecha, Mes/Año de Fecha Modificación con fallback Fecha Ingreso)
     if (almacen_tipo1 == 'CD VES' and
         centro == 'P008' and
         almacen_val == 'H000' and
         estado == 'ALMA' and
         tipo_stock_str in ['1', '01']):
 
-        if alt_mode:
-            mes_año = convertir_fecha_mes_año(fecha_mod)
-            if mes_año is None:
-                mes_año = convertir_fecha_mes_año(fecha_ing)
-        else:
+        mes_año = convertir_fecha_mes_año(fecha_mod)
+        if mes_año is None:
             mes_año = convertir_fecha_mes_año(fecha_ing)
         return ('CD VES', mes_año)
 
@@ -358,7 +386,7 @@ def leer_datos_desde_zip(ruta_zip, tipo_archivo, fecha_inicio, fecha_fin, clasif
 
     # Inicializar contadores
     if tipo_archivo == 'FIJA':
-        contadores = {'CD VES': 0, 'ALMACENES': 0}
+        contadores = {'CD VES': 0, 'ALMACENES': 0, 'Almacen U': 0}
     else:
         contadores = {
             'CD VES': 0, 'PDV': 0, 'Televentas VES': 0,
@@ -373,21 +401,35 @@ def leer_datos_desde_zip(ruta_zip, tipo_archivo, fecha_inicio, fecha_fin, clasif
     print(f"\n[1/6] Abriendo archivo zip...")
 
     with zipfile.ZipFile(ruta_zip) as z:
-        # Buscar archivo: primero exacto, luego por nombre parcial
         nombres = z.namelist()
         base_nombre = os.path.splitext(os.path.basename(archivo_patron))[0]  # ej: 'Descarga_inventario_Infra_Valorado'
         carpeta_patron = archivo_patron.split('/')[0]  # ej: 'Fija'
 
+        # Búsqueda flexible: (1) match exacto, (2) nombre legado parcial,
+        # (3) fallback por tipo FIJA/MOVIL en el nombre (case-insensitive)
         archivo_interno = None
         if archivo_patron in nombres:
             archivo_interno = archivo_patron
         else:
             for nombre in nombres:
-                if (nombre.endswith('.txt') and
-                    carpeta_patron in nombre and
-                    base_nombre in nombre):
+                if nombre.endswith('.txt') and base_nombre in nombre:
                     archivo_interno = nombre
                     break
+
+            if archivo_interno is None:
+                tipo_lower = tipo_archivo.lower()  # 'fija' o 'movil'
+                tipo_opuesto = 'movil' if tipo_lower == 'fija' else 'fija'
+                candidatos = [
+                    n for n in nombres
+                    if n.lower().endswith('.txt')
+                    and tipo_lower in n.lower()
+                    and tipo_opuesto not in n.lower()
+                ]
+                if len(candidatos) == 1:
+                    archivo_interno = candidatos[0]
+                elif len(candidatos) > 1:
+                    print(f"ERROR: Múltiples archivos candidatos para {tipo_archivo}: {candidatos}")
+                    sys.exit(1)
 
         if archivo_interno is None:
             print(f"ERROR: No se encontró archivo que coincida con '{archivo_patron}' en el ZIP")
@@ -401,22 +443,32 @@ def leer_datos_desde_zip(ruta_zip, tipo_archivo, fecha_inicio, fecha_fin, clasif
             header_line = f.readline().decode('latin-1').strip()
             header_cols = header_line.split('|')
 
-            # Construir diccionario de índices
+            # Construir diccionario de índices usando alias (toma la primera columna que aparezca)
             idx = {}
-            for key, col_name in TXT_COL_MAP.items():
-                try:
-                    idx[key] = header_cols.index(col_name)
-                except ValueError:
-                    print(f"ERROR: No se encontró la columna '{col_name}' en el archivo TXT")
+            for key, posibles in TXT_COL_MAP.items():
+                if key == 'estado':
+                    continue  # se resuelve aparte (puede estar como 'Estado' directo o como segundo 'Status')
+                encontrado = None
+                for nombre in posibles:
+                    if nombre in header_cols:
+                        encontrado = header_cols.index(nombre)
+                        break
+                if encontrado is None:
+                    print(f"ERROR: No se encontró ninguna de las columnas {posibles} en el archivo TXT")
                     print(f"    Columnas disponibles: {header_cols[:10]}...")
                     sys.exit(1)
+                idx[key] = encontrado
 
-            # Manejar duplicado "Status" → usar la segunda ocurrencia (col 37 = Estado)
-            status_positions = [i for i, h in enumerate(header_cols) if h == 'Status']
-            if len(status_positions) < 2:
-                print(f"ERROR: Se esperaban 2 columnas 'Status', se encontraron {len(status_positions)}")
-                sys.exit(1)
-            idx['estado'] = status_positions[1]
+            # Estado: si existe columna directa 'Estado' (schema nuevo), usarla;
+            # si no, usar la segunda ocurrencia de 'Status' (schema viejo, col ~37)
+            if 'Estado' in header_cols:
+                idx['estado'] = header_cols.index('Estado')
+            else:
+                status_positions = [i for i, h in enumerate(header_cols) if h == 'Status']
+                if len(status_positions) < 2:
+                    print("ERROR: No se encontró columna 'Estado' ni dos columnas 'Status'")
+                    sys.exit(1)
+                idx['estado'] = status_positions[1]
 
             # Índices de columnas texto (para preservar formato en salida)
             indices_texto = []
@@ -476,7 +528,7 @@ def leer_datos_desde_zip(ruta_zip, tipo_archivo, fecha_inicio, fecha_fin, clasif
                     if serie is not None and str(serie).strip() != '':
                         serie = str(serie).strip()
                         if tipo_archivo == 'FIJA':
-                            if almacen_agrupado == 'ALMACENES':
+                            if almacen_agrupado in ['ALMACENES', 'Almacen U']:
                                 series_verificar.append(serie)
                         else:
                             if almacen_agrupado in ['PDV', 'Televentas VES', 'Tienda Virtual VES', 'Corporativo Ves']:
@@ -700,7 +752,7 @@ def main():
                                     serie = str(serie)
 
                             if tipo_archivo == 'FIJA':
-                                if almacen_agrupado == 'ALMACENES':
+                                if almacen_agrupado in ['ALMACENES', 'Almacen U']:
                                     series_verificar.append(serie)
                             else:
                                 if almacen_agrupado in ['PDV', 'Televentas VES', 'Tienda Virtual VES', 'Corporativo Ves']:
@@ -748,23 +800,6 @@ def main():
         print(f"    Guardado: {archivo_salida_series}")
         wb_series.Close(SaveChanges=False)
 
-        # ===== Reporte alternativo (ALT) =====
-        # CD VES usa Fecha Modificación como Mes/Año (si válida), sino Fecha Ingreso
-        if formato == 'zip':
-            print(f"\n[6/6] Generando reporte alternativo (ALT)...")
-            print(f"    CD VES: Mes/Año = Fecha Modificación (si válida), sino Fecha Ingreso")
-            archivo_salida_alt = os.path.join(DIRECTORIO, f"FIFO_PROCESADO_{tipo_archivo}_ALT.xlsb")
-            clasificar_fila_alt = partial(clasificar_fila, alt_mode=True)
-            _, filas_salida_alt, _, contadores_alt, _, _ = \
-                leer_datos_desde_zip(archivo_entrada, tipo_archivo, fecha_inicio, fecha_fin, clasificar_fila_alt)
-
-            print(f"    Resumen ALT:")
-            for grupo, cantidad in contadores_alt.items():
-                print(f"    - {grupo}: {cantidad:,}")
-            print(f"    - Total registros: {len(filas_salida_alt):,}")
-
-            escribir_procesado_xlsb(excel, headers_vals, headers, filas_salida_alt, columnas_texto_salida, archivo_salida_alt)
-
     except Exception as e:
         print(f"\nERROR: {e}")
         import traceback
@@ -784,9 +819,6 @@ def main():
         print(f"  - {grupo}: {cantidad:,}")
     print(f"\nArchivo de series: {archivo_salida_series}")
     print(f"  - Series: {len(series_verificar):,}")
-    if formato == 'zip':
-        print(f"\nArchivo alternativo: {os.path.join(DIRECTORIO, f'FIFO_PROCESADO_{tipo_archivo}_ALT.xlsb')}")
-        print(f"  - CD VES Mes/Año basado en Fecha Modificación")
 
 
 if __name__ == "__main__":

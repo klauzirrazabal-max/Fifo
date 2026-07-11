@@ -18,8 +18,8 @@ import sys
 import zipfile
 import shutil
 
-# Directorio de trabajo
-DIRECTORIO = r"C:\FIFO"
+# Directorio de trabajo: donde está el script
+DIRECTORIO = os.path.dirname(os.path.abspath(__file__))
 
 # Diccionario de meses en español
 MESES_ESP = {
@@ -33,20 +33,38 @@ MESES_ESP_INV = {v: k for k, v in MESES_ESP.items()}
 # Configuración por tipo de archivo
 CONFIG_TIPO = {
     'FIJA': {
-        'carpeta_zip': 'Fija',
+        'carpeta_zip': ['Fija', 'Infra'],
         'filtro_ce': 'P008',
         'filtro_alm': 'P000',
-        'grupos_filtrar': ['ALMACENES'],  # Grupos cuyas series se validan
+        'grupos_filtrar': ['ALMACENES', 'Almacen U'],  # Series destino a validar contra Fifo.zip
+        'tds': [
+            {'nombre': 'TD',   'grupos': ['ALMACENES'],  'ocultar': ['Almacen U']},
+            {'nombre': 'TD_U', 'grupos': ['Almacen U'],  'ocultar': ['ALMACENES']},
+        ],
         'archivo_procesado': 'FIFO_PROCESADO_FIJA.xlsb',
         'archivo_verificar': 'VERIFICAR SALIDA CDVES FIJA {MES}.xlsx',
         'archivo_salida': 'Fifo_Fija_{MES}.xlsb',
         'hoja_series': 'FIJA'
     },
     'MOVIL': {
-        'carpeta_zip': 'Movil',
+        'carpeta_zip': ['Movil'],
         'filtro_ce': 'P008',
         'filtro_alm': 'H000',
         'grupos_filtrar': ['PDV', 'Televentas VES', 'Tienda Virtual VES', 'Corporativo Ves'],
+        'tds': [
+            {'nombre': 'PDV',
+             'grupos': ['PDV'],
+             'ocultar': ['Televentas VES', 'Tienda Virtual VES', 'Corporativo Ves']},
+            {'nombre': 'Televentas',
+             'grupos': ['Televentas VES'],
+             'ocultar': ['PDV', 'Tienda Virtual VES', 'Corporativo Ves']},
+            {'nombre': 'Tienda_Virtual',
+             'grupos': ['Tienda Virtual VES'],
+             'ocultar': ['PDV', 'Televentas VES', 'Corporativo Ves']},
+            {'nombre': 'Corporativo',
+             'grupos': ['Corporativo Ves'],
+             'ocultar': ['PDV', 'Televentas VES', 'Tienda Virtual VES']},
+        ],
         'archivo_procesado': 'FIFO_PROCESADO_MOVIL.xlsb',
         'archivo_verificar': 'VERIFICAR SALIDA CDVES MOVIL {MES}.xlsx',
         'archivo_salida': 'Fifo_Movil_{MES}.xlsb',
@@ -175,31 +193,65 @@ def extraer_zip(zip_path, destino):
     return destino
 
 
+def _parsear_linea_pipe(linea):
+    """Parsea una línea con formato pipe-delimited (|col1|col2|...)"""
+    # Quitar pipes inicial y final, split por |, strip espacios
+    linea = linea.strip()
+    if linea.startswith('|'):
+        linea = linea[1:]
+    if linea.endswith('|'):
+        linea = linea[:-1]
+    return [campo.strip() for campo in linea.split('|')]
+
+
 def leer_archivos_movimientos(carpeta_base, config, mes_filtro, año_filtro):
     """
-    Lee todos los archivos .XLS (TSV) de la carpeta correspondiente
-    y retorna un set de series que cumplen los filtros
+    Lee archivos de movimientos de la carpeta correspondiente.
+    Soporta dos formatos:
+      - .XLS (TSV, UTF-16) - formato antiguo
+      - .txt (pipe-delimited, latin-1) - formato nuevo
     """
     series_encontradas = set()
-    carpeta_nombre = config['carpeta_zip']
+    carpetas_posibles = config['carpeta_zip']
     filtro_ce = config['filtro_ce']
     filtro_alm = config['filtro_alm']
 
-    ruta_carpeta = os.path.join(carpeta_base, carpeta_nombre)
-    if not os.path.exists(ruta_carpeta):
-        print(f"    Carpeta {carpeta_nombre} no encontrada, saltando...")
+    # Buscar la primera carpeta que exista
+    ruta_carpeta = None
+    carpeta_usada = None
+    for carpeta_nombre in carpetas_posibles:
+        ruta = os.path.join(carpeta_base, carpeta_nombre)
+        if os.path.exists(ruta):
+            ruta_carpeta = ruta
+            carpeta_usada = carpeta_nombre
+            break
+
+    if ruta_carpeta is None:
+        print(f"    Carpetas {carpetas_posibles} no encontradas, saltando...")
         return series_encontradas
 
-    archivos = [f for f in os.listdir(ruta_carpeta) if f.upper().endswith('.XLS')]
-    print(f"    Procesando {len(archivos)} archivos en {carpeta_nombre}/...")
+    # Buscar archivos .XLS y .txt
+    archivos = [f for f in os.listdir(ruta_carpeta)
+                if f.upper().endswith('.XLS') or f.upper().endswith('.TXT')]
+    print(f"    Procesando {len(archivos)} archivos en {carpeta_usada}/...")
     print(f"    Filtros: Ce.={filtro_ce}, Alm.={filtro_alm}, Fecha={mes_filtro}/{año_filtro}")
 
     for archivo in archivos:
         ruta_archivo = os.path.join(ruta_carpeta, archivo)
+
         try:
-            with open(ruta_archivo, 'r', encoding='utf-16') as f:
+            # Detectar encoding por BOM (UTF-16 LE/BE) o fallback a latin-1
+            with open(ruta_archivo, 'rb') as f:
+                primeros_bytes = f.read(2)
+            if primeros_bytes in (b'\xff\xfe', b'\xfe\xff'):
+                encoding = 'utf-16'
+            else:
+                encoding = 'latin-1'
+
+            with open(ruta_archivo, 'r', encoding=encoding) as f:
                 lineas = f.readlines()
 
+            # Buscar línea de encabezados
             header_idx = None
             for i, linea in enumerate(lineas):
                 if 'Ce.' in linea and 'Alm.' in linea and 'serie' in linea.lower():
@@ -209,7 +261,14 @@ def leer_archivos_movimientos(carpeta_base, config, mes_filtro, año_filtro):
             if header_idx is None:
                 continue
 
-            headers = lineas[header_idx].strip().split('\t')
+            # Detectar separador por el contenido del header (tab vs pipe)
+            header_line = lineas[header_idx]
+            if header_line.count('\t') >= header_line.count('|'):
+                separador = 'tab'
+                headers = header_line.strip().split('\t')
+            else:
+                separador = 'pipe'
+                headers = _parsear_linea_pipe(header_line)
 
             col_ce = col_alm = col_serie = col_fecha = None
             for j, h in enumerate(headers):
@@ -226,12 +285,20 @@ def leer_archivos_movimientos(carpeta_base, config, mes_filtro, año_filtro):
             if None in [col_ce, col_alm, col_serie, col_fecha]:
                 continue
 
+            # Leer datos
             for i in range(header_idx + 1, len(lineas)):
                 linea = lineas[i].strip()
                 if not linea:
                     continue
 
-                campos = linea.split('\t')
+                if separador == 'pipe':
+                    # Saltar líneas de separación (-----)
+                    if linea.startswith('|--') or linea.startswith('---'):
+                        continue
+                    campos = _parsear_linea_pipe(linea)
+                else:
+                    campos = linea.split('\t')
+
                 if len(campos) <= max(col_ce, col_alm, col_serie, col_fecha):
                     continue
 
@@ -256,104 +323,25 @@ def leer_archivos_movimientos(carpeta_base, config, mes_filtro, año_filtro):
     return series_encontradas
 
 
-def procesar_reporte(excel, archivo_procesado, archivo_salida, series_no_encontradas,
-                     grupos_filtrar, tipo_archivo, batch_size=50000, label=""):
+def crear_pivot_y_fifo(wb_salida, ws_data, nombre_hoja, grupos_filtrar, items_ocultar,
+                       nombre_col_serie, fila_inicio_datos, ultima_col_proc, tipo_archivo,
+                       table_name):
     """
-    Procesa FIFO_PROCESADO, filtra series no encontradas, crea tabla dinámica y análisis FIFO.
-    Genera el archivo de salida final (.xlsb).
+    Crea una hoja con tabla dinámica y análisis FIFO sobre el rango de datos compartido.
 
-    Retorna: registros_finales (int)
+    - nombre_hoja: nombre de la nueva hoja (ej. 'TD', 'TD_U')
+    - grupos_filtrar: lista de Almacen Agrupado considerados destinos para el cálculo FIFO
+    - items_ocultar: lista de PivotItems de Almacen Agrupado a ocultar del pivot
+    - table_name: nombre interno de la tabla dinámica (debe ser único en el workbook)
+
+    Retorna: (total_despacho, total_no_despacho, cumplimiento)
     """
-    print(f"\n--- Procesando{label} {os.path.basename(archivo_procesado)} ---")
-    wb_proc = excel.Workbooks.Open(archivo_procesado)
-    ws_proc = wb_proc.ActiveSheet
-
-    ultima_fila_proc = ws_proc.UsedRange.Rows.Count
-    ultima_col_proc = ws_proc.UsedRange.Columns.Count
-    print(f"    Registros iniciales: {ultima_fila_proc - 1:,}")
-
-    # Leer encabezados
-    headers_range = ws_proc.Range(ws_proc.Cells(1, 1), ws_proc.Cells(1, ultima_col_proc))
-    headers_vals = headers_range.Value[0]
-
-    # Encontrar índices de columnas (0-indexed para Python)
-    idx_serie = idx_almacen_agrupado = None
-    nombre_col_serie = None
-    for i, h in enumerate(headers_vals):
-        if h in ('Serie', 'Número de serie'):
-            idx_serie = i
-            nombre_col_serie = h
-        elif h == 'Almacen Agrupado':
-            idx_almacen_agrupado = i
-
-    print(f"    Grupos a filtrar: {grupos_filtrar}")
-
-    # Leer y filtrar datos por lotes
-    print(f"    Leyendo y filtrando por lotes...")
-    filas_salida = []
-    eliminados = 0
-
-    fila = 2
-    while fila <= ultima_fila_proc:
-        fila_fin = min(fila + batch_size - 1, ultima_fila_proc)
-        print(f"    Lote: filas {fila:,} - {fila_fin:,} de {ultima_fila_proc:,}")
-
-        data_range = ws_proc.Range(ws_proc.Cells(fila, 1), ws_proc.Cells(fila_fin, ultima_col_proc))
-        batch_data = data_range.Value
-
-        if fila_fin == fila:
-            batch_data = [batch_data]
-
-        for row in batch_data:
-            serie = row[idx_serie]
-            almacen_agrupado = row[idx_almacen_agrupado]
-
-            if almacen_agrupado in grupos_filtrar:
-                serie_norm = quitar_ceros_iniciales(serie)
-                if serie_norm in series_no_encontradas:
-                    eliminados += 1
-                    continue
-
-            filas_salida.append(list(row))
-
-        fila = fila_fin + 1
-
-    wb_proc.Close(SaveChanges=False)
-
-    registros_finales = len(filas_salida)
-    print(f"    Registros eliminados: {eliminados:,}")
-    print(f"    Registros finales: {registros_finales:,}")
-
-    # Crear nuevo workbook para salida
-    print(f"    Creando archivo de salida...")
-    wb_salida = excel.Workbooks.Add()
-    ws_data = wb_salida.ActiveSheet
-    ws_data.Name = "Data"
-
-    for i, h in enumerate(headers_vals, 1):
-        ws_data.Cells(1, i).Value = h
-
-    print(f"    Escribiendo datos...")
-    fila_salida = 2
-    for i in range(0, registros_finales, batch_size):
-        fin = min(i + batch_size, registros_finales)
-        print(f"      Escribiendo registros {i+1:,} - {fin:,}")
-
-        batch = filas_salida[i:fin]
-        rango = ws_data.Range(
-            ws_data.Cells(fila_salida, 1),
-            ws_data.Cells(fila_salida + len(batch) - 1, ultima_col_proc)
-        )
-        rango.Value = batch
-        fila_salida += len(batch)
-
-    # Crear tabla dinámica
-    print(f"    Creando tabla dinámica...")
+    print(f"\n    Creando hoja '{nombre_hoja}' (grupos destino: {grupos_filtrar})...")
 
     ws_td = wb_salida.Worksheets.Add(After=wb_salida.Worksheets(wb_salida.Worksheets.Count))
-    ws_td.Name = "TD"
+    ws_td.Name = nombre_hoja
 
-    rango_datos = ws_data.Range(ws_data.Cells(1, 1), ws_data.Cells(fila_salida - 1, ultima_col_proc))
+    rango_datos = ws_data.Range(ws_data.Cells(1, 1), ws_data.Cells(fila_inicio_datos - 1, ultima_col_proc))
 
     pivot_cache = wb_salida.PivotCaches().Create(
         SourceType=1,
@@ -362,7 +350,7 @@ def procesar_reporte(excel, archivo_procesado, archivo_salida, series_no_encontr
 
     pivot_table = pivot_cache.CreatePivotTable(
         TableDestination=ws_td.Range("A3"),
-        TableName="TablaDinamicaFIFO"
+        TableName=table_name
     )
 
     pf_material = pivot_table.PivotFields("Material")
@@ -386,6 +374,13 @@ def procesar_reporte(excel, archivo_procesado, archivo_salida, series_no_encontr
         pi_cdves.Position = 1
     except:
         pass
+
+    for item_nombre in items_ocultar:
+        try:
+            pi = pf_almacen.PivotItems(item_nombre)
+            pi.Visible = False
+        except:
+            pass
 
     pf_serie = pivot_table.PivotFields(nombre_col_serie)
     pivot_table.AddDataField(pf_serie, "Cuenta de Serie", -4112)
@@ -561,7 +556,7 @@ def procesar_reporte(excel, archivo_procesado, archivo_salida, series_no_encontr
                 ws_td.Cells(d['fila'], col_no_fifo).Value = d['no_fifo']
 
         col_resumen = col_no_fifo + 2
-        ws_td.Cells(1, col_resumen).Value = f"RESUMEN FIFO {tipo_archivo}{label}"
+        ws_td.Cells(1, col_resumen).Value = f"RESUMEN FIFO {tipo_archivo} [{nombre_hoja}]"
         ws_td.Cells(1, col_resumen).Font.Bold = True
 
         ws_td.Cells(2, col_resumen).Value = "Total Despacho:"
@@ -578,13 +573,125 @@ def procesar_reporte(excel, archivo_procesado, archivo_salida, series_no_encontr
             ws_td.Cells(4, col_resumen + 1).Value = f"{cumplimiento:.2f}%"
             ws_td.Cells(4, col_resumen).Font.Bold = True
 
-        print(f"    Análisis FIFO completado:")
+        print(f"    Análisis FIFO completado ({nombre_hoja}):")
         print(f"      - Total Despacho: {total_despacho:,}")
         print(f"      - Total No Despachó: {total_no_despacho:,}")
         if total_despacho > 0:
             print(f"      - Cumplimiento FIFO: {cumplimiento:.2f}%")
     else:
-        print(f"    ADVERTENCIA: No se encontraron todas las columnas para análisis FIFO")
+        print(f"    ADVERTENCIA: No se encontraron todas las columnas para análisis FIFO en {nombre_hoja}")
+
+    return total_despacho, total_no_despacho, cumplimiento
+
+
+def procesar_reporte(excel, archivo_procesado, archivo_salida, series_no_encontradas,
+                     grupos_filtrar, tds, tipo_archivo, batch_size=50000):
+    """
+    Procesa FIFO_PROCESADO, filtra series no encontradas, crea una o más tablas dinámicas
+    con su análisis FIFO. Genera el archivo de salida final (.xlsb).
+
+    - grupos_filtrar: grupos cuyas series se descartan si no aparecen en Fifo.zip.
+    - tds: lista de dicts {nombre, grupos, ocultar} para crear cada hoja TD.
+
+    Retorna: registros_finales (int)
+    """
+    print(f"\n--- Procesando {os.path.basename(archivo_procesado)} ---")
+    wb_proc = excel.Workbooks.Open(archivo_procesado)
+    ws_proc = wb_proc.ActiveSheet
+
+    ultima_fila_proc = ws_proc.UsedRange.Rows.Count
+    ultima_col_proc = ws_proc.UsedRange.Columns.Count
+    print(f"    Registros iniciales: {ultima_fila_proc - 1:,}")
+
+    # Leer encabezados
+    headers_range = ws_proc.Range(ws_proc.Cells(1, 1), ws_proc.Cells(1, ultima_col_proc))
+    headers_vals = headers_range.Value[0]
+
+    idx_serie = idx_almacen_agrupado = None
+    nombre_col_serie = None
+    for i, h in enumerate(headers_vals):
+        if h in ('Serie', 'Número de serie'):
+            idx_serie = i
+            nombre_col_serie = h
+        elif h == 'Almacen Agrupado':
+            idx_almacen_agrupado = i
+
+    print(f"    Grupos a filtrar contra Fifo.zip: {grupos_filtrar}")
+
+    # Leer y filtrar datos por lotes (descartar series destino no encontradas en Fifo.zip)
+    print(f"    Leyendo y filtrando por lotes...")
+    filas_salida = []
+    eliminados = 0
+
+    fila = 2
+    while fila <= ultima_fila_proc:
+        fila_fin = min(fila + batch_size - 1, ultima_fila_proc)
+        print(f"    Lote: filas {fila:,} - {fila_fin:,} de {ultima_fila_proc:,}")
+
+        data_range = ws_proc.Range(ws_proc.Cells(fila, 1), ws_proc.Cells(fila_fin, ultima_col_proc))
+        batch_data = data_range.Value
+
+        if fila_fin == fila:
+            batch_data = [batch_data]
+
+        for row in batch_data:
+            serie = row[idx_serie]
+            almacen_agrupado = row[idx_almacen_agrupado]
+
+            if almacen_agrupado in grupos_filtrar:
+                serie_norm = quitar_ceros_iniciales(serie)
+                if serie_norm in series_no_encontradas:
+                    eliminados += 1
+                    continue
+
+            filas_salida.append(list(row))
+
+        fila = fila_fin + 1
+
+    wb_proc.Close(SaveChanges=False)
+
+    registros_finales = len(filas_salida)
+    print(f"    Registros eliminados: {eliminados:,}")
+    print(f"    Registros finales: {registros_finales:,}")
+
+    # Crear nuevo workbook para salida
+    print(f"    Creando archivo de salida...")
+    wb_salida = excel.Workbooks.Add()
+    ws_data = wb_salida.ActiveSheet
+    ws_data.Name = "Data"
+
+    for i, h in enumerate(headers_vals, 1):
+        ws_data.Cells(1, i).Value = h
+
+    print(f"    Escribiendo datos...")
+    fila_salida = 2
+    for i in range(0, registros_finales, batch_size):
+        fin = min(i + batch_size, registros_finales)
+        print(f"      Escribiendo registros {i+1:,} - {fin:,}")
+
+        batch = filas_salida[i:fin]
+        rango = ws_data.Range(
+            ws_data.Cells(fila_salida, 1),
+            ws_data.Cells(fila_salida + len(batch) - 1, ultima_col_proc)
+        )
+        rango.Value = batch
+        fila_salida += len(batch)
+
+    # Crear una hoja TD por cada entrada en `tds`
+    for idx_td, td_cfg in enumerate(tds):
+        table_name = f"TablaDinamicaFIFO_{idx_td}"
+        crear_pivot_y_fifo(
+            wb_salida=wb_salida,
+            ws_data=ws_data,
+            nombre_hoja=td_cfg['nombre'],
+            grupos_filtrar=td_cfg['grupos'],
+            items_ocultar=td_cfg['ocultar'],
+            nombre_col_serie=nombre_col_serie,
+            fila_inicio_datos=fila_salida,
+            ultima_col_proc=ultima_col_proc,
+            tipo_archivo=tipo_archivo,
+            table_name=table_name,
+        )
 
     wb_salida.SaveAs(archivo_salida, FileFormat=50)
     print(f"    Archivo guardado: {archivo_salida}")
@@ -625,14 +732,14 @@ def main():
         sys.exit(1)
 
     # Paso 1: Extraer ZIP
-    print(f"\n[1/6] Extrayendo ZIP...")
+    print(f"\n[1/5] Extrayendo ZIP...")
     carpeta_temp = os.path.join(DIRECTORIO, "temp_movimientos")
     if os.path.exists(carpeta_temp):
         shutil.rmtree(carpeta_temp)
     extraer_zip(zip_path, carpeta_temp)
 
     # Paso 2: Leer series a verificar usando Excel COM
-    print(f"\n[2/6] Leyendo series a verificar...")
+    print(f"\n[2/5] Leyendo series a verificar...")
     excel = win32.gencache.EnsureDispatch('Excel.Application')
     excel.Visible = False
     excel.DisplayAlerts = False
@@ -670,37 +777,23 @@ def main():
         print(f"    Series a verificar: {len(series_verificar):,}")
 
         # Paso 3: Buscar series en archivos de movimientos
-        print(f"\n[3/6] Buscando series en archivos de movimientos...")
+        print(f"\n[3/5] Buscando series en archivos de movimientos...")
         series_encontradas = leer_archivos_movimientos(carpeta_temp, config, mes_num, año_num)
         print(f"    Series encontradas en movimientos: {len(series_encontradas):,}")
 
         # Paso 4: Identificar series no encontradas
-        print(f"\n[4/6] Identificando series no encontradas...")
+        print(f"\n[4/5] Identificando series no encontradas...")
         series_no_encontradas = series_verificar - series_encontradas
         print(f"    Series NO encontradas: {len(series_no_encontradas):,}")
 
-        # Paso 5-6: Procesar reporte original
+        # Paso 5: Procesar reporte
         grupos_filtrar = config['grupos_filtrar']
-        print(f"\n[5/6] Procesando reporte original...")
+        tds = config['tds']
+        print(f"\n[5/5] Procesando reporte ({len(tds)} hoja(s) TD)...")
         registros_finales = procesar_reporte(
             excel, archivo_procesado, archivo_salida, series_no_encontradas,
-            grupos_filtrar, tipo_archivo, BATCH_SIZE
+            grupos_filtrar, tds, tipo_archivo, BATCH_SIZE
         )
-
-        # Paso 7: Procesar reporte alternativo (ALT) si existe
-        archivo_procesado_alt = archivo_procesado.replace('.xlsb', '_ALT.xlsb')
-        archivo_salida_alt = archivo_salida.replace('.xlsb', '_ALT.xlsb')
-
-        registros_finales_alt = None
-        if os.path.exists(archivo_procesado_alt):
-            print(f"\n[6/6] Procesando reporte alternativo (ALT)...")
-            print(f"    CD VES: Mes/Año basado en Fecha Modificación")
-            registros_finales_alt = procesar_reporte(
-                excel, archivo_procesado_alt, archivo_salida_alt, series_no_encontradas,
-                grupos_filtrar, tipo_archivo, BATCH_SIZE, label=" ALT"
-            )
-        else:
-            print(f"\n[6/6] No se encontró archivo ALT ({os.path.basename(archivo_procesado_alt)}), omitiendo reporte alternativo.")
 
     except Exception as e:
         print(f"ERROR: {e}")
@@ -721,11 +814,8 @@ def main():
     print(f"{'=' * 60}")
     print(f"\nArchivo generado: {archivo_salida}")
     print(f"  - Hoja 'Data': {registros_finales:,} registros")
-    print(f"  - Hoja 'TD': Tabla dinámica con análisis FIFO")
-    if registros_finales_alt is not None:
-        print(f"\nArchivo alternativo: {archivo_salida_alt}")
-        print(f"  - Hoja 'Data': {registros_finales_alt:,} registros")
-        print(f"  - Hoja 'TD': Tabla dinámica con análisis FIFO (Fecha Modificación)")
+    for td_cfg in config['tds']:
+        print(f"  - Hoja '{td_cfg['nombre']}': Tabla dinámica con análisis FIFO (grupos: {td_cfg['grupos']})")
 
 
 if __name__ == "__main__":
