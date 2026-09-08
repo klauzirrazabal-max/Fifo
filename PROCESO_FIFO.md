@@ -4,6 +4,11 @@
 
 > Los scripts detectan automáticamente el **mes anterior** a la fecha actual.
 > Si ejecutas en **marzo 2026**, procesan **febrero 2026**. No hay que configurar el mes.
+>
+> **Meses atrasados:** si necesitas procesar un mes que NO es el anterior (ej: correr julio
+> estando ya en septiembre), pásalo como **tercer argumento** a `procesar_fifo.py`:
+> `python procesar_fifo.py fifo_julio.zip FIJA JULIO` (también acepta `2026-07`).
+> Sin ese argumento el script tomaría el mes anterior a hoy y filtraría por el rango equivocado.
 
 ### Flujo en 2 etapas
 
@@ -26,6 +31,17 @@ python procesar_fifo.py archivos_base.zip MOVIL
 Esto produce `VERIFICAR SALIDA CDVES FIJA {MES}.xlsx` y `VERIFICAR SALIDA CDVES MOVIL {MES}.xlsx`, que contienen las **series** del inventario base. Estas series son el insumo que se usa en SAP para extraer los movimientos del mes.
 
 **Pausa** — con esos dos `.xlsx` en mano, se arma `Fifo.zip` (movimientos del mes filtrados por esas series).
+
+> ⚠️ **Nombres de los zip:** Windows NO distingue mayúsculas de minúsculas en los nombres de archivo.
+> `fIfo_julio.zip` y `Fifo_julio.zip` son **el mismo archivo**, así que copiar el zip de movimientos
+> con un nombre que solo difiere en capitalización del zip base lo **sobrescribe sin avisar**.
+> Convención a usar: `archivos_base_{mes}.zip` para el inventario base y `Fifo_mov_{mes}.zip`
+> para los movimientos.
+>
+> ⚠️ **Si procesas más de un mes seguido:** `FIFO_PROCESADO_FIJA.xlsb` y `FIFO_PROCESADO_MOVIL.xlsb`
+> se generan siempre con el mismo nombre, así que el segundo mes **pisa** al primero. Guarda los del
+> primer mes en `pendiente\{Mes}\` antes de correr el siguiente, y vuelve a copiarlos a la raíz
+> cuando toque su Etapa B. (Los `VERIFICAR SALIDA ...xlsx` sí llevan el mes en el nombre y no chocan.)
 
 **Etapa B — Verificar despachos FIFO** (necesita `Fifo.zip`)
 
@@ -79,6 +95,9 @@ Claude Code conoce el flujo en 2 etapas y sabe que entre A y B hay que ir a SAP 
 | Enero 2026 | 2026-02-26 | 98.78% | 99.97% | Bug corregido: columna "Número de serie" vs "Serie" |
 | Abril 2026 | 2026-05-28 | TD 99.16% / TD_U 93.75% | PDV 99.72% / Corp 99.98% / Telev 99.90% / TV 99.73% | Primera corrida con: (a) lógica única usando Fecha Modificación para CD VES, (b) nuevo grupo `Almacen U` (Centro P008 + Almacén que empieza con U) y hoja `TD_U`, (c) sin archivos `_ALT` |
 | Mayo 2026 | 2026-07-02 | TD 99.88% / TD_U 100.00% | PDV 99.65% / Corp 100.00% / Telev 100.00% / TV 99.51% | Se adaptó `procesar_fifo.py` al nuevo schema SAP: 139 cols (antes 62), alias multi-nombre en `TXT_COL_MAP`, fechas `DD/MM/YYYY` además de `YYYYMMDD`, `Estado` como columna directa (antes segunda ocurrencia de `Status`) |
+| Junio 2026 | Etapa A 2026-07-24 / Etapa B 2026-08-03 | (ver hojas TD del .xlsb) | (ver hojas TD del .xlsb) | Completo. Archivado en `historico\2026\Junio\` el 2026-09-02 |
+| Julio 2026 | Etapa A 2026-09-02 / Etapa B 2026-09-03 | TD 99.83% / TD_U 50.00% (n=9) | PDV 100.00% / Telev 100.00% / TV 100.00% / Corp 100.00% | Mes atrasado: Etapa A forzada con `... FIJA JULIO`. Movimientos: `Fifo_mov_julio.zip` (traia carpeta envolvente `Movimientos Julio Fifo/`; se hizo recursiva la busqueda de carpeta en `verificar_fifo.py`). TD_U con solo 9 series, % no representativo |
+| Agosto 2026 | Etapa A 2026-09-02 / Etapa B 2026-09-04 | TD 99.62% / TD_U 97.30% (n=38) | PDV 99.78% / Telev 99.81% / TV 99.31% / Corp 99.93% | Base: `archivos_base_agosto.zip`. Movimientos: `Fifo_mov_agosto.zip` (carpeta envolvente + `Fija/6.txt` en formato legado UTF-16/tabs mientras 1-5 eran pipe/latin-1; el script maneja ambos por archivo). Series: FIJA 136,992 / MOVIL 43,794 |
 
 ---
 
@@ -156,7 +175,8 @@ C:\FIFO\
 ├── PROCESO_FIFO.md           # Esta documentación
 ├── archivos_base.zip         # Inventario base
 ├── Fifo.zip                  # Movimientos del mes
-├── historico\                # Archivos procesados anteriormente
+├── historico\                # Archivos procesados anteriormente (por año/mes)
+├── pendiente\                # Intermedios de meses con Etapa A hecha y Etapa B pendiente
 └── obsoleto\                 # Scripts que ya no se usan
 ```
 

@@ -216,19 +216,43 @@ def leer_archivos_movimientos(carpeta_base, config, mes_filtro, año_filtro):
     filtro_ce = config['filtro_ce']
     filtro_alm = config['filtro_alm']
 
-    # Buscar la primera carpeta que exista
+    # Buscar la primera carpeta que exista (match exacto en la raiz)
     ruta_carpeta = None
     carpeta_usada = None
     for carpeta_nombre in carpetas_posibles:
         ruta = os.path.join(carpeta_base, carpeta_nombre)
-        if os.path.exists(ruta):
+        if os.path.isdir(ruta):
             ruta_carpeta = ruta
             carpeta_usada = carpeta_nombre
             break
 
+    # Fallback flexible RECURSIVO: buscar en todo el arbol una carpeta cuyo nombre
+    # CONTENGA alguna palabra clave y que tenga archivos de datos dentro.
+    # Cubre 'Trx Fija/' y tambien zips con carpeta envolvente
+    # (ej: 'Movimientos Julio Fifo/Fija/'), que antes fallaban en silencio.
+    if ruta_carpeta is None and os.path.isdir(carpeta_base):
+        claves = [c.lower() for c in carpetas_posibles]
+        candidatas = []
+        for dirpath, dirnames, filenames in os.walk(carpeta_base):
+            nombre = os.path.basename(dirpath).lower()
+            if not any(clave in nombre for clave in claves):
+                continue
+            if not any(f.upper().endswith(('.XLS', '.TXT')) for f in filenames):
+                continue
+            # Prioridad por orden de la palabra clave en carpetas_posibles
+            prioridad = min(i for i, clave in enumerate(claves) if clave in nombre)
+            candidatas.append((prioridad, len(dirpath), dirpath))
+        if candidatas:
+            candidatas.sort()
+            ruta_carpeta = candidatas[0][2]
+            carpeta_usada = os.path.relpath(ruta_carpeta, carpeta_base)
+            print(f"    Carpeta detectada por busqueda recursiva: {carpeta_usada}")
+
     if ruta_carpeta is None:
-        print(f"    Carpetas {carpetas_posibles} no encontradas, saltando...")
-        return series_encontradas
+        print(f"    ERROR: no se encontro ninguna carpeta {carpetas_posibles} con archivos .XLS/.TXT")
+        print(f"           dentro de {carpeta_base}")
+        print(f"           Revisa la estructura del ZIP de movimientos.")
+        sys.exit(1)
 
     # Buscar archivos .XLS y .txt
     archivos = [f for f in os.listdir(ruta_carpeta)

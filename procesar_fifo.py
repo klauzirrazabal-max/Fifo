@@ -10,11 +10,18 @@ USO:
     python procesar_fifo.py archivos_base.zip MOVIL
     python procesar_fifo.py "Base_Fija_enero.xlsb"
     python procesar_fifo.py  (solicita el nombre del archivo)
+
+MES A PROCESAR (opcional, 3er argumento):
+    Por defecto se procesa el MES ANTERIOR a la fecha actual. Para reprocesar
+    otro mes (p.ej. meses atrasados) se pasa como tercer argumento:
+        python procesar_fifo.py fifo_julio.zip FIJA JULIO
+        python procesar_fifo.py fifo_julio.zip FIJA 2026-07
 """
 
 import win32com.client as win32
 from datetime import datetime, timedelta
 import os
+import re
 import sys
 import zipfile
 
@@ -75,6 +82,46 @@ ZIP_FILES = {
 
 # Columnas que deben formatearse como texto (formato txt) — soporta nombres viejos y nuevos
 COLUMNAS_TEXTO_TXT = ['Número de serie', 'Serie', 'Número de equipo', 'Material', 'Lote', 'Nº cliente']
+
+
+def resolver_mes():
+    """
+    Determina (año, mes) a procesar.
+
+    Por defecto: mes anterior a la fecha actual.
+    Si se pasa un 3er argumento en linea de comandos, se usa ese mes:
+      - "JULIO" / "julio"  -> mes por nombre; el año se infiere hacia atras
+                              (si el mes aun no ocurrio este año, se toma el anterior)
+      - "2026-07"          -> año y mes explicitos
+    """
+    fecha_actual = datetime.now()
+
+    if len(sys.argv) > 3:
+        arg = sys.argv[3].strip()
+
+        m = re.match(r'^(\d{4})-(\d{1,2})$', arg)
+        if m:
+            año, mes = int(m.group(1)), int(m.group(2))
+            if not 1 <= mes <= 12:
+                print(f"ERROR: Mes invalido en '{arg}'. Use 1-12.")
+                sys.exit(1)
+            return año, mes
+
+        nombre = arg.upper()
+        for num, nom in MESES_ESP.items():
+            if nom == nombre:
+                # Inferir año: si el mes todavia no ocurrio este año, es del año pasado
+                año = fecha_actual.year if num <= fecha_actual.month else fecha_actual.year - 1
+                return año, num
+
+        print(f"ERROR: Mes no reconocido: '{arg}'")
+        print(f"    Use un nombre en español (ej: JULIO) o el formato YYYY-MM (ej: 2026-07).")
+        sys.exit(1)
+
+    # Por defecto: mes anterior
+    primer_dia_mes_actual = fecha_actual.replace(day=1)
+    ultimo_dia_mes_anterior = primer_dia_mes_actual - timedelta(days=1)
+    return ultimo_dia_mes_anterior.year, ultimo_dia_mes_anterior.month
 
 
 def detectar_tipo_archivo(nombre_archivo):
@@ -425,6 +472,16 @@ def leer_datos_desde_zip(ruta_zip, tipo_archivo, fecha_inicio, fecha_fin, clasif
                     and tipo_lower in n.lower()
                     and tipo_opuesto not in n.lower()
                 ]
+                # Si hay más de un candidato, preferir el "Valorado" (el patrón de
+                # ZIP_FILES siempre apunta al valorizado) descartando variantes "NoValorado".
+                if len(candidatos) > 1:
+                    def _es_novalorado(n):
+                        low = n.lower().replace(' ', '').replace('_', '').replace('-', '')
+                        return 'novalorado' in low
+                    filtrados = [n for n in candidatos if not _es_novalorado(n)]
+                    if filtrados:
+                        candidatos = filtrados
+
                 if len(candidatos) == 1:
                     archivo_interno = candidatos[0]
                 elif len(candidatos) > 1:
@@ -584,12 +641,9 @@ def escribir_procesado_xlsb(excel, headers_vals, headers, filas_salida, columnas
 def main():
     archivo_entrada, tipo_archivo, formato = obtener_archivo_entrada()
 
-    # Calcular mes anterior
+    # Mes a procesar (mes anterior por defecto, o el indicado en el 3er argumento)
     fecha_actual = datetime.now()
-    primer_dia_mes_actual = fecha_actual.replace(day=1)
-    ultimo_dia_mes_anterior = primer_dia_mes_actual - timedelta(days=1)
-    año_mes_anterior = ultimo_dia_mes_anterior.year
-    mes_num_anterior = ultimo_dia_mes_anterior.month
+    año_mes_anterior, mes_num_anterior = resolver_mes()
 
     nombre_mes_esp = MESES_ESP[mes_num_anterior]
 
@@ -603,7 +657,8 @@ def main():
     print(f"\n=== PROCESAMIENTO FIFO {tipo_archivo} ===")
     print(f"Formato entrada: {formato.upper()}")
     print(f"Fecha actual: {fecha_actual.strftime('%d/%m/%Y')}")
-    print(f"Mes anterior: {nombre_mes_esp} {año_mes_anterior}")
+    origen_mes = "forzado por argumento" if len(sys.argv) > 3 else "mes anterior (automatico)"
+    print(f"Mes a procesar: {nombre_mes_esp} {año_mes_anterior}  [{origen_mes}]")
     print(f"Archivo entrada: {archivo_entrada}")
     print(f"Tipo archivo: {tipo_archivo}")
 
