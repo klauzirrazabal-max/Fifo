@@ -40,8 +40,8 @@ Esto produce `VERIFICAR SALIDA CDVES FIJA {MES}.xlsx` y `VERIFICAR SALIDA CDVES 
 >
 > ⚠️ **Si procesas más de un mes seguido:** `FIFO_PROCESADO_FIJA.xlsb` y `FIFO_PROCESADO_MOVIL.xlsb`
 > se generan siempre con el mismo nombre, así que el segundo mes **pisa** al primero. Guarda los del
-> primer mes en `pendiente\{Mes}\` antes de correr el siguiente, y vuelve a copiarlos a la raíz
-> cuando toque su Etapa B. (Los `VERIFICAR SALIDA ...xlsx` sí llevan el mes en el nombre y no chocan.)
+> primer mes en una carpeta aparte (ej. `pendiente\{Mes}\`) antes de correr el siguiente, y vuelve
+> a copiarlos a la raíz cuando toque su Etapa B; al archivar el mes van a `historico\2026\{Mes}\`. (Los `VERIFICAR SALIDA ...xlsx` sí llevan el mes en el nombre y no chocan.)
 
 **Etapa B — Verificar despachos FIFO** (necesita `Fifo.zip`)
 
@@ -96,8 +96,8 @@ Claude Code conoce el flujo en 2 etapas y sabe que entre A y B hay que ir a SAP 
 | Abril 2026 | 2026-05-28 | TD 99.16% / TD_U 93.75% | PDV 99.72% / Corp 99.98% / Telev 99.90% / TV 99.73% | Primera corrida con: (a) lógica única usando Fecha Modificación para CD VES, (b) nuevo grupo `Almacen U` (Centro P008 + Almacén que empieza con U) y hoja `TD_U`, (c) sin archivos `_ALT` |
 | Mayo 2026 | 2026-07-02 | TD 99.88% / TD_U 100.00% | PDV 99.65% / Corp 100.00% / Telev 100.00% / TV 99.51% | Se adaptó `procesar_fifo.py` al nuevo schema SAP: 139 cols (antes 62), alias multi-nombre en `TXT_COL_MAP`, fechas `DD/MM/YYYY` además de `YYYYMMDD`, `Estado` como columna directa (antes segunda ocurrencia de `Status`) |
 | Junio 2026 | Etapa A 2026-07-24 / Etapa B 2026-08-03 | (ver hojas TD del .xlsb) | (ver hojas TD del .xlsb) | Completo. Archivado en `historico\2026\Junio\` el 2026-09-02 |
-| Julio 2026 | Etapa A 2026-09-02 / Etapa B 2026-09-03 | TD 99.83% / TD_U 50.00% (n=9) | PDV 100.00% / Telev 100.00% / TV 100.00% / Corp 100.00% | Mes atrasado: Etapa A forzada con `... FIJA JULIO`. Movimientos: `Fifo_mov_julio.zip` (traia carpeta envolvente `Movimientos Julio Fifo/`; se hizo recursiva la busqueda de carpeta en `verificar_fifo.py`). TD_U con solo 9 series, % no representativo |
-| Agosto 2026 | Etapa A 2026-09-02 / Etapa B 2026-09-04 | TD 99.62% / TD_U 97.30% (n=38) | PDV 99.78% / Telev 99.81% / TV 99.31% / Corp 99.93% | Base: `archivos_base_agosto.zip`. Movimientos: `Fifo_mov_agosto.zip` (carpeta envolvente + `Fija/6.txt` en formato legado UTF-16/tabs mientras 1-5 eran pipe/latin-1; el script maneja ambos por archivo). Series: FIJA 136,992 / MOVIL 43,794 |
+| Julio 2026 | Etapa A 2026-09-02 / Etapa B 2026-09-03 | TD 99.83% / TD_U 50.00% (n=9) | PDV 100.00% / Telev 100.00% / TV 100.00% / Corp 100.00% | Completo y archivado en `historico\2026\Julio\` el 2026-09-08. Mes atrasado: Etapa A forzada con `... FIJA JULIO`. Movimientos: `Fifo_mov_julio.zip` (traia carpeta envolvente `Movimientos Julio Fifo/`; se hizo recursiva la busqueda de carpeta en `verificar_fifo.py`). TD_U con solo 9 series, % no representativo |
+| Agosto 2026 | Etapa A 2026-09-02 / Etapa B 2026-09-04 | TD 99.62% / TD_U 97.30% (n=38) | PDV 99.78% / Telev 99.81% / TV 99.31% / Corp 99.93% | Completo y archivado en `historico\2026\Agosto\` el 2026-09-08. Base: `archivos_base_agosto.zip`. Movimientos: `Fifo_mov_agosto.zip` (carpeta envolvente + `Fija/6.txt` en formato legado UTF-16/tabs mientras 1-5 eran pipe/latin-1; el script maneja ambos por archivo). Series: FIJA 136,992 / MOVIL 43,794 |
 
 ---
 
@@ -176,7 +176,6 @@ C:\FIFO\
 ├── archivos_base.zip         # Inventario base
 ├── Fifo.zip                  # Movimientos del mes
 ├── historico\                # Archivos procesados anteriormente (por año/mes)
-├── pendiente\                # Intermedios de meses con Etapa A hecha y Etapa B pendiente
 └── obsoleto\                 # Scripts que ya no se usan
 ```
 
